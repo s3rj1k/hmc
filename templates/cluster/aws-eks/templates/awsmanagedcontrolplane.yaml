@@ -12,3 +12,5 @@ spec:
   identityRef:
     kind: {{ .Values.clusterIdentity.kind }}
     name: {{ .Values.clusterIdentity.name }}
+  additionalTags:
+    sigs.k8s.io/cluster-api-provider-aws/cluster/{{ include "cluster.name" . }}: owned
