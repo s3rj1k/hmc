@@ -16,12 +16,17 @@ package providers
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 
 	"github.com/go-logr/logr"
+	"github.com/traefik/yaegi/interp"
+	"github.com/traefik/yaegi/stdlib"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	hmc "github.com/Mirantis/hmc/api/v1alpha1"
@@ -48,7 +53,9 @@ var (
 		},
 	}
 
-	registry map[string]ProviderModule
+	registry    map[string]ProviderModule
+	interpreter *interp.Interpreter
+	pluginsPath string
 )
 
 type ProviderModule interface {
@@ -68,7 +75,90 @@ type ProviderModule interface {
 	) (enabled bool, err error)
 }
 
-// Register adds a new provider module to the registry
+// InitializePluginSystem sets up the Yaegi interpreter and loads plugins from the directory
+func InitializePluginSystem(pluginDir string) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	pluginsPath = pluginDir
+
+	if registry == nil {
+		registry = make(map[string]ProviderModule)
+	}
+
+	interpreter = interp.New(interp.Options{
+		GoPath:       filepath.Join(pluginDir, "vendor"),
+		Unrestricted: true,
+	})
+
+	if err := interpreter.Use(stdlib.Symbols); err != nil {
+		return fmt.Errorf("failed to load stdlib: %w", err)
+	}
+
+	return loadPluginsFromDirectory()
+}
+
+func loadPluginsFromDirectory() error {
+	entries, err := os.ReadDir(pluginsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Directory doesn't exist, silently return
+			return nil
+		}
+		return fmt.Errorf("failed to read plugins directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+			if err := loadSinglePlugin(entry.Name()); err != nil {
+				return fmt.Errorf("failed to load plugin %q: %w", entry.Name(), err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func loadSinglePlugin(filename string) error {
+	fullPath := filepath.Join(pluginsPath, filename)
+
+	_, err := interpreter.EvalPath(fullPath)
+	if err != nil {
+		return fmt.Errorf("failed to evaluate plugin: %w", err)
+	}
+
+	v, err := interpreter.Eval("NewProvider()")
+	if err != nil {
+		return fmt.Errorf("failed to instantiate plugin: %w", err)
+	}
+
+	provider, ok := v.Interface().(ProviderModule)
+	if !ok {
+		return errors.New("does not implement ProviderModule interface")
+	}
+
+	return registerProvider(provider)
+}
+
+func registerProvider(p ProviderModule) error {
+	shortName := p.GetName()
+
+	if _, exists := registry[shortName]; exists {
+		return fmt.Errorf("provider %q already registered", shortName)
+	}
+
+	providers = append(providers,
+		hmc.Provider{
+			Name: ProviderPrefix + shortName,
+		},
+	)
+
+	registry[shortName] = p
+
+	return nil
+}
+
+// Register adds a new provider module to the registry (static registration)
 func Register(p ProviderModule) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -77,19 +167,9 @@ func Register(p ProviderModule) {
 		registry = make(map[string]ProviderModule)
 	}
 
-	shortName := p.GetName()
-
-	if _, exists := registry[shortName]; exists {
-		panic(fmt.Sprintf("provider %q already registered", shortName))
+	if err := registerProvider(p); err != nil {
+		panic(err)
 	}
-
-	providers = append(providers,
-		hmc.Provider{
-			Name: ProviderPrefix + p.GetName(),
-		},
-	)
-
-	registry[shortName] = p
 }
 
 // List returns a copy of all registered providers

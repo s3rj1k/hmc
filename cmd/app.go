@@ -18,11 +18,16 @@ import (
 	"os"
 
 	"github.com/Mirantis/hmc/pkg/manager"
-	_ "github.com/Mirantis/hmc/pkg/providers/azure"
+	"github.com/Mirantis/hmc/pkg/providers"
 	_ "github.com/Mirantis/hmc/pkg/providers/vsphere"
 )
 
 func main() {
+	err := providers.InitializePluginSystem("/usr/local/src/hmc/plugins/")
+	if err != nil {
+		panic(err)
+	}
+
 	if err := manager.Main(); err != nil {
 		os.Exit(1)
 	}
